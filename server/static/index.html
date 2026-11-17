@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>古地图影像配准工具</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <span class="brand">古地图影像配准 <small>TPS 平滑非刚性变形</small></span>
+  <label class="btn">加载扫描图<input type="file" id="fileSource" accept="image/*" hidden></label>
+  <label class="btn">加载参考图<input type="file" id="fileRef" accept="image/*" hidden></label>
+  <label class="btn">导入地标<input type="file" id="fileLm" accept=".json,.csv,.txt" hidden></label>
+  <span class="sep"></span>
+  <label>λ(弯曲惩罚) <input type="range" id="lamSlider" min="-4" max="4" step="0.5" value="0">
+    <input type="number" id="lamVal" step="any" value="1" title="λ = 10^滑块; 0 为精确插值"></label>
+  <span class="sep"></span>
+  <button id="btnWarp">重采样到参考网格</button>
+  <button id="btnExportParams" disabled>导出变形参数</button>
+  <button id="btnExportPng" disabled>导出配准图</button>
+</header>
+
+<div id="extentBar">
+  参考平面范围(世界坐标, y 向上):
+  xmin <input id="exMin" size="7" value="0">
+  ymin <input id="exMinY" size="7" value="0">
+  xmax <input id="exMax" size="7" value="1000">
+  ymax <input id="exMaxY" size="7" value="800">
+  <button id="btnExtent">应用范围</button>
+  <span id="extentHint">未加载参考图时使用虚拟网格; 加载后默认为图像像素范围</span>
+</div>
+
+<div id="main">
+  <div id="panels">
+    <div class="panel">
+      <div class="panel-title">① 扫描图(源平面, 像素坐标)</div>
+      <canvas id="cvSrc"></canvas>
+    </div>
+    <div class="panel">
+      <div class="panel-title">② 参考平面(目标, 世界坐标)</div>
+      <canvas id="cvRef"></canvas>
+    </div>
+  </div>
+  <aside id="side">
+    <section>
+      <h3>操作模式</h3>
+      <div class="row">
+        <button class="modeBtn active" data-mode="add">添加地标</button>
+        <button class="modeBtn" data-mode="edit">移动/选择</button>
+        <button class="modeBtn" data-mode="pan">平移视图</button>
+      </div>
+      <div class="hint" id="modeHint">先在左图点击地标位置, 再在右图点击对应点, 即成一对。</div>
+      <div class="row">
+        <button id="btnDelete">删除选中地标</button>
+        <button id="btnClear">清空地标</button>
+      </div>
+    </section>
+    <section>
+      <h3>叠加层</h3>
+      <label><input type="checkbox" id="ovUncertainty" checked> 不确定性热力图</label>
+      <label><input type="checkbox" id="ovHull" checked> 凸包外(未约束)区域</label>
+      <label><input type="checkbox" id="ovGrid" checked> 变形网格</label>
+      <label><input type="checkbox" id="ovResiduals" checked> 残差矢量 ×<input type="number" id="resScale" value="10" min="1" max="200" style="width:4em"></label>
+      <label><input type="checkbox" id="ovFolds" checked> 折叠警告</label>
+      <label><input type="checkbox" id="ovWarp"> 配准结果叠加 <input type="range" id="warpOpacity" min="10" max="100" value="70" style="width:70px"></label>
+      <label><input type="checkbox" id="ovFail"> 求逆失败/越界掩膜</label>
+    </section>
+    <section>
+      <h3>诊断</h3>
+      <div id="diag" class="diag">尚未拟合(至少 3 对地标)。</div>
+      <div id="stats"></div>
+    </section>
+    <section>
+      <h3>地标残差</h3>
+      <div class="tblWrap"><table id="tbl">
+        <thead><tr><th>#</th><th>拟合残差</th><th>留一残差</th></tr></thead>
+        <tbody></tbody>
+      </table></div>
+    </section>
+    <section id="warpSec" style="display:none">
+      <h3>重采样结果</h3>
+      <div id="warpStats"></div>
+    </section>
+  </aside>
+</div>
+<script src="app.js"></script>
+</body>
+</html>
