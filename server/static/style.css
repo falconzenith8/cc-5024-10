@@ -45,3 +45,4 @@ th { color: #8ab4f8; position: sticky; top: 0; background: #191d23; }
 tr.flagged td { color: #ff7b72; font-weight: 600; }
 tr.selected td { background: #1f3a6e; }
 #warpStats { font-size: 12.5px; color: #adbac7; white-space: pre-line; }
+#warpStats.err { color: #ff7b72; }

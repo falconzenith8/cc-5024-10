@@ -12,8 +12,9 @@ const state = {
   mode: "add",
   lambda: 1.0,
   fit: null,                          // 最近一次 /api/fit 响应
-  warp: null,                         // {img, stats, failedMask, outsideMask, b64}
+  warp: null,                         // {img, stats, failedMask, outsideMask, b64, resultId}
   fitSeq: 0,
+  fitDirty: false,                    // 地标/λ/范围已改, 预览结果待更新
 };
 
 const VIRTUAL_W = 1000, VIRTUAL_H = 800;  // 无参考图时的虚拟显示尺寸
@@ -263,7 +264,9 @@ function drawRef() {
         ctx.beginPath(); ctx.arc(cx + dx, cy + dy, 2.5, 0, 7);
         ctx.fillStyle = "#ff7b72"; ctx.fill();
       }
-      const lr = Math.hypot(f.loocv[i][0], f.loocv[i][1]) * scale;
+      const lvo = f.loocv[i];
+      const lr = (lvo && lvo[0] !== null && lvo[1] !== null)
+        ? Math.hypot(lvo[0], lvo[1]) * scale : 0;
       if (lr > 3) {
         ctx.strokeStyle = "rgba(210, 153, 34, 0.8)"; ctx.lineWidth = 1;
         ctx.beginPath(); ctx.arc(cx, cy, Math.min(lr, 60), 0, 7); ctx.stroke();
@@ -294,7 +297,18 @@ function drawAll() { drawSrc(); drawRef(); }
 
 /* ---------- 拟合 ---------- */
 let fitTimer = null;
+function invalidateWarp() {
+  // 地标/λ/范围变化后, 旧的叠图与导出像素不再对应当前求解结果
+  if (state.warp) {
+    state.warp = null;
+    $("btnExportPng").disabled = true;
+    $("warpStats").classList.remove("err");
+    $("warpStats").textContent = "地标/参数已修改, 请重新重采样。";
+  }
+}
 function scheduleFit() {
+  state.fitDirty = true;
+  invalidateWarp();
   clearTimeout(fitTimer);
   fitTimer = setTimeout(doFit, 250);
 }
@@ -302,7 +316,7 @@ function scheduleFit() {
 async function doFit() {
   const lms = state.landmarks;
   if (lms.length < 3) {
-    state.fit = null; uncCanvas = null;
+    state.fit = null; uncCanvas = null; state.fitDirty = false;
     $("diag").innerHTML = "尚未拟合(至少 3 对地标)。";
     $("stats").textContent = "";
     updateTable();
@@ -310,6 +324,7 @@ async function doFit() {
     return;
   }
   const seq = ++state.fitSeq;
+  state.fitDirty = true;
   const body = {
     source_points: lms.map(l => [l.sx, l.sy]),
     target_points: lms.map(l => [l.tx, l.ty]),
@@ -326,12 +341,17 @@ async function doFit() {
     const d = await r.json();
     if (seq !== state.fitSeq) return;  // 已有更新的请求
     state.fit = d;
+    state.fitDirty = false;
     buildUncCanvas();
     updateDiag();
     updateTable();
     $("btnExportParams").disabled = !d.ok;
   } catch (err) {
-    $("diag").innerHTML = `<span class='err'>请求失败: ${err}</span>`;
+    if (seq === state.fitSeq) {
+      state.fit = null;
+      state.fitDirty = false;
+      $("diag").innerHTML = `<span class='err'>请求失败: ${err}</span>`;
+    }
   }
   drawAll();
 }
@@ -382,7 +402,12 @@ function updateTable() {
     let res = "—", loo = "—";
     if (f && f.ok) {
       res = fmt(Math.hypot(f.fit_residuals[i][0], f.fit_residuals[i][1]));
-      loo = fmt(Math.hypot(f.loocv[i][0], f.loocv[i][1]));
+      const lv = f.loocv[i];
+      if (lv && lv[0] !== null && lv[1] !== null) {
+        loo = fmt(Math.hypot(lv[0], lv[1]));
+      } else {
+        loo = "—";  // 留一残差无定义(地标过少), 不显示为 0
+      }
       if (f.loocv_flags[i]) tr.classList.add("flagged");
     }
     tr.innerHTML = `<td>${i + 1}</td><td>${res}</td><td>${loo}</td>`;
@@ -392,9 +417,25 @@ function updateTable() {
 }
 
 /* ---------- 重采样 ---------- */
+function showWarpError(msg) {
+  $("warpSec").style.display = "block";
+  const el = $("warpStats");
+  el.textContent = "配准失败: " + msg;
+  el.classList.add("err");
+}
+
 async function doWarp() {
-  if (!state.srcId) { alert("请先加载扫描图"); return; }
-  if (state.landmarks.length < 3) { alert("至少需要 3 对地标"); return; }
+  if (!state.srcId) { showWarpError("请先加载扫描图"); return; }
+  if (state.landmarks.length < 3) { showWarpError("至少需要 3 对地标"); return; }
+  // 叠图/形变场必须来自"当前地标与 λ"对应的同一个求解结果:
+  // 若预览尚未完成或已过期, 先同步重算, 避免叠图与预览显示不同结果。
+  if (!state.fit || !state.fit.ok || state.fitDirty) {
+    await doFit();
+  }
+  if (!state.fit || !state.fit.ok) {
+    showWarpError((state.fit && (state.fit.errors || []).join("; ")) || "拟合未完成");
+    return;
+  }
   const e = state.extent;
   const dx = e.xmax - e.xmin, dy = e.ymax - e.ymin;
   const w = 1600, h = Math.min(4000, Math.round(w * dy / dx));
@@ -407,28 +448,52 @@ async function doWarp() {
     out_width: w, out_height: h,
   };
   $("warpSec").style.display = "block";
-  $("warpStats").textContent = "重采样中…";
-  const r = await fetch("/api/warp", {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  const d = await r.json();
-  if (!d.ok) {
-    $("warpStats").textContent = "失败: " + (d.errors || []).join("; ");
-    return;
+  const statsEl = $("warpStats");
+  statsEl.classList.remove("err");
+  statsEl.textContent = "重采样中…";
+  try {
+    const r = await fetch("/api/warp", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const d = await r.json();
+    if (!d.ok) {
+      showWarpError((d.errors || []).join("; ") || `HTTP ${r.status}`);
+      state.warp = null;
+      $("btnExportPng").disabled = true;
+      drawAll();
+      return;
+    }
+    const img = new Image();
+    img.src = "data:image/png;base64," + d.png_base64;
+    await img.decode();
+    const resultId = d.solve.result_id;
+    state.warp = {
+      img, stats: d.stats, failedMask: d.failed_mask,
+      outsideMask: d.outside_mask, b64: d.png_base64, resultId,
+    };
+    const s = d.stats;
+    const sameResult = resultId === state.fit.solve.result_id;
+    statsEl.textContent =
+      `求解结果 ${resultId.slice(0, 12)}…${sameResult ? " (与预览一致)" : " (与预览不同!)"}\n` +
+      `输出 ${w}×${h}, 有效 ${(100 * s.n_valid / s.n_total).toFixed(1)}%\n` +
+      `越界无数据 ${s.n_outside} px, 求逆失败 ${s.n_failed} px\n` +
+      `(奇异 ${s.fail_singular} / 未收敛 ${s.fail_no_converge} / 非有限 ${s.fail_nonfinite})\n` +
+      `平均牛顿迭代 ${fmt(s.mean_iters, 2)} 次, 容差 ${fmt(s.tol, 2)} 世界单位`;
+    if (!sameResult) {
+      // 不应发生: 服务端保证两条路径共用同一结果。出现即视为异常并提示。
+      showWarpError("重采样结果与预览的求解结果不一致, 请重新配准");
+      $("btnExportPng").disabled = true;
+      drawAll();
+      return;
+    }
+    $("ovWarp").checked = true;
+    $("btnExportPng").disabled = false;
+  } catch (err) {
+    showWarpError(String(err));
+    state.warp = null;
+    $("btnExportPng").disabled = true;
   }
-  const img = new Image();
-  img.src = "data:image/png;base64," + d.png_base64;
-  await img.decode();
-  state.warp = { img, stats: d.stats, failedMask: d.failed_mask, outsideMask: d.outside_mask, b64: d.png_base64 };
-  const s = d.stats;
-  $("warpStats").textContent =
-    `输出 ${w}×${h}, 有效 ${(100 * s.n_valid / s.n_total).toFixed(1)}%\n` +
-    `越界无数据 ${s.n_outside} px, 求逆失败 ${s.n_failed} px\n` +
-    `(奇异 ${s.fail_singular} / 未收敛 ${s.fail_no_converge} / 非有限 ${s.fail_nonfinite})\n` +
-    `平均牛顿迭代 ${fmt(s.mean_iters, 2)} 次, 容差 ${fmt(s.tol, 2)} 世界单位`;
-  $("ovWarp").checked = true;
-  $("btnExportPng").disabled = false;
   drawAll();
 }
 
@@ -445,6 +510,8 @@ function exportParams() {
   const f = state.fit;
   if (!f || !f.ok) return;
   const out = Object.assign({}, f.model, {
+    // 预览与导出读取同一求解结果: 记录其版本与 id, 便于核对
+    solve: f.solve,
     diagnostics: {
       rms_error: f.rms_error, max_error: f.max_error, loocv_rms: f.loocv_rms,
       sigma_hat: f.sigma_hat, bending_energy: f.bending_energy,
@@ -453,6 +520,9 @@ function exportParams() {
       warnings: f.warnings, errors: f.errors,
     },
     target_extent: [state.extent.xmin, state.extent.ymin, state.extent.xmax, state.extent.ymax],
+    resample: state.warp ? {
+      source_result_id: state.warp.resultId, stats: state.warp.stats,
+    } : null,
   });
   download("georect_params.json", JSON.stringify(out, null, 2));
 }
@@ -645,8 +715,9 @@ $("fileSource").onchange = async (ev) => {
   const r = await fetch("/api/upload/source", { method: "POST", body: fd });
   const d = await r.json();
   state.srcId = d.ok ? d.id : null;
-  state.warp = null;
-  $("btnExportPng").disabled = true;
+  if (!d.ok) {
+    showWarpError("扫描图上传失败: " + (d.errors || []).join("; "));
+  }
   scheduleFit();
 };
 

@@ -68,11 +68,39 @@ TPS 正映射没有解析逆。对每个输出像素的目标坐标 y, 用**阻�
 
 失败/越界像素在输出 RGBA 中 alpha=0, 统计与掩膜在界面中展示。
 
+### 代码分层(求解结果为有版本的独立对象)
+
+配准内核把三件事分开, 并通过版本化对象串起来:
+
+| 层 | 模块 | 职责 |
+|---|---|---|
+| 地标约束 | `georect.kernel.LandmarkConstraints` | 只有求解输入 (源点、目标点、λ); 构造时校验形状/点数/非有限值 |
+| 求解结果 | `georect.kernel.solve_registration` | 返回 `RegistrationSolve`(成功)或 `RegistrationFailure`(失败)两种明确类型, 均带 `version` 与确定性 `result_id` |
+| 变形求值 | `georect.field.DeformationField` | 从某一求解结果构造, 记录 `source_result_id`; 提供 `evaluate/jacobian/displacement/grid_lines`, 不重新拟合、不接触像素 |
+| 图像反采样 | `georect.resample.resample_field` | 输入是版本化变形场; `tol`、输出尺寸、范围必须由调用方显式给出; 返回带来源信息的 `ResampleResult` |
+
+- **同一结果**: `/api/fit`(预览)、`/api/warp`(叠图/重采样)与导出都读取同一个
+  `result_id`; 前端会核对两者一致, 不一致即在配准界面报错。
+- **失败有类型**: 系统奇异等无法建模时返回 `RegistrationFailure`(含错误文本,
+  请求失败返回的变形场会抛 `RegistrationNotSolved`); 不会用空模型或默认值遮错。
+- **不改变拟合目标**: 所有数值原语(TPS 求解、正则化 λ、用户坐标求值、反向采样
+  的阻尼牛顿法与边界政策)仍复用原实现; 分层只调整接口与结果的归属。
+- **兼容适配**: 旧入口 `diagnostics.run_all`、`tps.fit_tps`、`warp.resample_to_grid`
+  与 `warp.invert_map` 原样保留, 古图配准既有调用方无需改动; `warp` 现为适配层,
+  内部转发到 `resample`, 并用模型内容指纹显式标注变形场来源。
+- **求解采样分层**: 位移场的网格采样被划为重构范围; 冻结外部行为的黄金数据在
+  `tests/golden/registration_golden.json`, 由 `scripts/freeze_golden.py` 生成,
+  对位移场数值与导出 RGBA 原始字节逐字节比对。
+
 ## 运行
+
+古图配准的**图形入口**是本地网页: 启动服务后在浏览器打开
+<http://127.0.0.1:5000> 完成全部操作(加载、编辑对应点、配准、检查叠图与形变场、
+导出)。命令行只起辅助作用: 启动服务、生成演示数据、冻结/比对黄金数据。
 
 ```bash
 pip install -r requirements.txt   # 或: pip install numpy flask pillow pytest
-python3 server/app.py             # 打开 http://127.0.0.1:5000
+python3 server/app.py             # 启动后在浏览器打开 http://127.0.0.1:5000
 ```
 
 界面流程:
@@ -83,17 +111,20 @@ python3 server/app.py             # 打开 http://127.0.0.1:5000
    "移动/选择"模式可拖动修正、双击或 Delete 删除; 每次增删改都会实际重算;
 4. 调节 λ 观察变形网格、残差、不确定性的变化;
 5. 叠加层: 不确定性热力图 / 凸包外区域 / 变形网格 / 残差矢量 / 折叠警告 /
-   配准结果 / 求逆失败掩膜;
+   配准结果 / 求逆失败掩膜; 叠图与形变场均来自当前求解结果的实际运算;
 6. **重采样到参考网格**生成配准图; **导出变形参数**(JSON: 控制点、权重、仿射、
-   λ、诊断摘要)与**导出配准图**(RGBA PNG, 无数据处透明)。
+   λ、诊断摘要、求解结果版本与 id)与**导出配准图**(RGBA PNG, 无数据处透明)。
 
 地标也可从 CSV(`sx,sy,tx,ty` 每行一对)或此前导出的参数 JSON 导入。
+地标矛盾、折叠、求逆失败等异常都会在右侧"诊断/重采样结果"面板明确提示,
+叠图与导出按钮在异常时禁用, 不会静默给出看似正常的结果。
 
 ## 测试
 
 ```bash
-python3 -m pytest tests/ -q        # 25 项测试
-python3 scripts/make_demo_data.py  # 生成 demo/ 演示数据
+python3 -m pytest tests/ -q          # 52 项测试
+python3 scripts/make_demo_data.py    # 生成 demo/ 演示数据(辅助)
+python3 scripts/freeze_golden.py     # 重新冻结位移场/导出像素黄金数据(辅助)
 ```
 
 测试覆盖:
@@ -105,7 +136,14 @@ python3 scripts/make_demo_data.py  # 生成 demo/ 演示数据
 - **重复点/近共线/奇异系统**: 诊断正确报告, 不抛出未处理异常;
 - **反向采样**: 与参考图数值比较; 边界外像素必须透明无数据(不编造);
   折叠变形中失败像素被显式统计; 输出绝不含非有限值;
-- **API**: 上传/拟合/重采样端到端。
+- **分层契约**(`tests/test_layering.py`): 求解成功/失败是明确类型; 版本与来源
+  id 必填(缺失即报错, 不用默认值遮错); 求解→变形场→反采样的来源串一致;
+  `tol` 必须显式给出; 同一输入得到同一 `result_id`;
+- **等价性**: 位移场数值与导出 RGBA 原始字节, 对黄金快照逐字节一致; 旧入口
+  (`run_all` + `resample_to_grid`)的旧样例能运行到底;
+- **API**: 上传/求解/重采样端到端; fit 与 warp 共享同一求解结果; 错误请求返回
+  明确的 400/500 而非伪装成功。界面流程另经无头浏览器验证(加载、编辑对应点、
+  配准、叠图与形变场、异常提示)。
 
 演示数据 (`demo/`): `reference.png`(现代参考图)、`scanned.png`(经已知真值场
 扭曲的"古地图", 含两处平滑鼓包与一处局部纸张伸缩)、`landmarks.csv`(36 对正确

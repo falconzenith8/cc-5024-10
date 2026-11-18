@@ -82,19 +82,22 @@ def condition_number(src: np.ndarray, lam: float) -> float:
 def loocv_residuals(src: np.ndarray, dst: np.ndarray, lam: float) -> np.ndarray:
     """留一交叉验证: 留出第 i 点重拟合, 在 src[i] 处预测并与 dst[i] 比较。
 
-    返回 (n,2) 残差; 若留出后系统奇异, 该行置 NaN 并在汇总中说明。
+    返回 (n,2) 残差; 若留出后点数不足或系统奇异, 该行置 NaN 并在汇总中说明。
     """
     src = np.asarray(src, dtype=np.float64)
     dst = np.asarray(dst, dtype=np.float64)
     n = len(src)
     res = np.full((n, 2), np.nan)
     idx = np.arange(n)
+    if n < 4:
+        # 留出一点后不足 3 点, 无法重拟合; 明确置 NaN 而不是抛出未处理异常
+        return res
     for i in range(n):
         keep = idx != i
         try:
             m = fit_tps(src[keep], dst[keep], lam)
             res[i] = evaluate(m, src[i : i + 1])[0] - dst[i]
-        except np.linalg.LinAlgError:
+        except (np.linalg.LinAlgError, ValueError):
             pass
     return res
 

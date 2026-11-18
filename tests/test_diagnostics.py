@@ -98,3 +98,16 @@ def test_run_all_smooth_case_clean():
     assert not out["errors"]
     assert out["folds"]["n_fold"] == 0
     assert out["max_error"] < 1e-6
+
+
+def test_loocv_undefined_with_too_few_points():
+    """3 点是合法的拟合规模, 但留一后不足 3 点: LOOCV 必须置 NaN 而非抛异常。"""
+    src = np.array([[0, 0], [10, 0], [0, 10]], float)
+    dst = np.array([[5, 5], [15, 0], [0, 10]], float)
+    loocv = loocv_residuals(src, dst, 0.0)
+    assert loocv.shape == (3, 2)
+    assert np.isnan(loocv).all()
+    out = run_all(src, dst, 0.0, src_extent=(0, 0, 10, 10))
+    assert not out["errors"]
+    assert out["model"].n == 3
+    assert np.isnan(out["loocv_rms"])
